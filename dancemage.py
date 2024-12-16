@@ -20,6 +20,14 @@ gameDisplay = pygame.display.set_mode(SCREENSIZE)
 pygame.display.set_caption("Dance Mage")
 pygame.display.set_icon(pygame.image.load(os.path.join("assets", "textures", "player", "player.png")))
 
+def unfreezeDecorator(func):
+    def unfreezeOrDo(self, *args):
+        if self.frozen:
+            self.frozen -= 1
+        else:
+            return func(self, *args)
+    return unfreezeOrDo
+
 def blitRotate(surf,image, pos, originPos, angle):
 
     #ifx rad ddeg
@@ -59,10 +67,10 @@ def changeTextbox(dabox, datext):
     dabox.html_text=str(datext)
     dabox.rebuild()
 
-def loadImage(path):
+def loadImage(path, dims = (1,1)):
     image = pygame.image.load(os.path.join("assets", "textures", path))
     
-    image = pygame.transform.scale(image, (GRIDSIZE, GRIDSIZE))
+    image = pygame.transform.scale(image, (GRIDSIZE*dims[0], GRIDSIZE*dims[1]))
     return image
 
 def initSound():
@@ -115,12 +123,12 @@ class Game():
 
     def __init__(self):
         self.mode = "playing"
-        self.player = Rogue((4,4))
-        self.arena = Arena(8,8)
         self.playerActionable = True # the player can press a button. (not spellstack, enemy actions, animation time)
         self.spellStack = []
         self.enemyStack = []
         self.wavesWon = 0
+        self.spellBook = [None]
+        self.playerClass = None
 
         self.particles = []
 
@@ -132,9 +140,9 @@ class Game():
 
     def beginResolveTurn(self):
         self.playerActionable = False
-        random.shuffle(self.arena.enemies)
-        self.arena.enemies.sort(key = lambda x: x.state=="normal")
-        self.enemyStack = self.arena.enemies[:]
+        self.enemyStack = self.arena.entities[:] # randomizing turn order is not very important. can be removed
+        random.shuffle(self.enemyStack)
+        self.enemyStack.sort(key = lambda x: hasattr(x, "state") and x.state=="normal")
 
     def update(self):
 
@@ -146,16 +154,17 @@ class Game():
             self.spellStack[0].activate(self.player, AtoV(self.player.angle))
             self.spellStack.pop(0)
         elif self.enemyStack:
-            if self.enemyStack[0].health > 0:
+            if self.enemyStack[0] in self.arena.entities:
                 self.enemyStack[0].act()
             self.enemyStack.pop(0)
         else:
             self.playerActionable = True
+            self.player.shield -= 1
 
             # ROUND CLEARED LOGIC
             
             if self.mode == "playing":
-                if len(self.arena.enemies) == 0:
+                if len([enemy for enemy in self.arena.entities if isinstance(enemy, Enemy)])==0:
                     self.wavesWon += 1
                     self.mode = "rewards"
                     self.generateRewards()
@@ -181,15 +190,19 @@ class Game():
             self.rewardOptions.append(ALLSPELLS[i]())
 
     def selectReward(self, n):
-        self.player.spellBook.append(self.rewardOptions[n])
+        self.spellBook.append(self.rewardOptions[n])
+        self.startPractice()
+
+    def startPractice(self):
         self.mode = "practice"
         self.arena = Arena(8,8)
+        self.player = self.playerClass((4,4))
 
     def startWave(self):
-        self.arena.generateWave(self.wavesWon*5)
-        self.player.health = 3
-        self.player.moveHistory = []
         self.mode = "playing"
+        self.arena = Arena(8,8)
+        self.player = self.playerClass((4,4))
+        self.arena.generateWave(3 + self.wavesWon*5)
 
     def draw(self):
         gameDisplay.fill((0,0,0))
@@ -220,21 +233,21 @@ class Arena():
     def __init__(self, w, h):
         self.width = w
         self.height = h
-        self.enemies = []
+        self.entities = []
 
-    def inbounds(self, x, y):
-        return 0<=x<self.width and 0<=y<self.height
+    def inbounds(self, x, y, fat=1):
+        return 0<=x and x+fat-1<=self.width-1 and 0<=y and y+fat-1<=self.height-1
 
-    def enemy_at(self, x, y):
-        for enemy in self.enemies:
-            if enemy.x == x and enemy.y == y:
+    def enemy_at(self, x, y, fat=1): # non - player entity
+        for enemy in self.entities:
+            if enemy.x <= x+fat-1 and x <= enemy.x + enemy.fat-1 and enemy.y <= y+fat-1 and y <= enemy.y + enemy.fat-1:
                 return enemy
         return None
 
-    def entity_at(self, x, y):
-        if game.player.x == x and game.player.y == y:
+    def entity_at(self, x, y, fat=1):
+        if game.player.x <= x+fat-1 and x <= game.player.x + game.player.fat-1 and game.player.y <= y+fat-1 and y <= game.player.y + game.player.fat-1:
             return game.player
-        return self.enemy_at(x, y)
+        return self.enemy_at(x, y, fat=1)
 
     def get_topleft(self):
 
@@ -252,12 +265,12 @@ class Arena():
                 difficultyLevel -= enemy.powerLevel
 
                 #SPAWN ENEMY
-                x = random.randint(0,self.width-1)
-                y = random.randint(0,self.height-1)
+                x = random.randint(0,self.width-enemy.fat)
+                y = random.randint(0,self.height-enemy.fat)
                 while self.entity_at(x,y):
-                    x = random.randint(0,self.width-1)
-                    y = random.randint(0,self.height-1)
-                self.enemies.append(enemy((x,y)))
+                    x = random.randint(0,self.width-enemy.fat)
+                    y = random.randint(0,self.height-enemy.fat)
+                self.entities.append(enemy((x,y)))
             else:
                 return
         return
@@ -275,7 +288,7 @@ class Arena():
                 #blitRotate(gameDisplay, image, (topleft[0] + x*GRIDSIZE +GRIDSIZE//2, topleft[1] + y*GRIDSIZE +GRIDSIZE//2), (GRIDSIZE//2,GRIDSIZE//2), 0)
                 gameDisplay.blit(image, (topleft[0] + x*GRIDSIZE, topleft[1] + y*GRIDSIZE))
 
-        for enemy in self.enemies:
+        for enemy in self.entities:
             enemy.draw()
 
     images = {}
@@ -390,12 +403,13 @@ class DashSpell(Spell):
 class FireSpell(Spell):
 
     powerLevel = 3
-    displayName = "Fire Spear"
+    displayName = "Fire Spear" # make this a fireball?
     displayIcon = "fire"
 
     def activate(self, player, dPos):
         game.animationTime = 16
-        for i in range(1,4):
+        #game.player.nr_of_fireSpell_casts += 1
+        for i in range(1,4):# + FireSpell.nr_of_fireSpell_casts):
             x = player.x + dPos[0]*i
             y = player.y + dPos[1]*i
             enemy = game.arena.enemy_at(x, y)
@@ -408,7 +422,7 @@ class FireSpell(Spell):
         playCrushSound()
 class ExplosionSpell(Spell):
 
-    powerLevel = 4
+    powerLevel = 5
     displayName = "Explode"
     displayIcon = "fire"
 
@@ -487,6 +501,67 @@ class FreezeSpell(Spell):
                 arrow = Particle(x, y, player.angle, "ice", 10)
                 game.particles.append(arrow)
         playCrushSound()
+class ShieldSpell(Spell):
+    powerLevel = 3
+    displayName = "Shield"
+    displayIcon = "shield"
+
+    def activate(self, player, dPos):
+        game.animationTime = 8
+        game.player.shield = 1
+        playWallSound()
+class RockSpell(Spell):
+
+    powerLevel = 3
+    displayName = "Fortify"
+    displayIcon = "rocks"
+
+    def activate(self, player, dPos):
+        game.animationTime = 8
+        for dx in [-1,0,1]:
+            for dy in [-1,0,1]:
+                x = player.x + dx
+                y = player.y + dy
+                entity = game.arena.entity_at(x, y)
+                if not entity and not abs(dx)+abs(dy)==2:
+                    game.arena.entities.append(Rock((x,y)))
+        makeSmokeCloud(player.x, player.y, 5, particleName = "rocks")
+        playCrushSound()
+class BombSpell(Spell):
+
+    powerLevel = 3
+    displayName = "Bomb"
+    displayIcon = "fire"
+
+    def activate(self, player, dPos):
+        game.animationTime = 8
+        newX = player.x + dPos[0]
+        newY = player.y + dPos[1]
+        if game.arena.inbounds(newX, newY):
+            entity = game.arena.enemy_at(newX, newY)
+            if entity:
+                entity.forcedMovement(dPos, 1)
+            entity = game.arena.enemy_at(newX, newY)
+            if not entity:
+                game.arena.entities.append(Bomb((newX, newY)))
+            playWallSound()
+class LightningSpell(Spell):
+
+    powerLevel = 2
+    displayName = "Lightning" # make this a fireball?
+    displayIcon = "lightning"
+
+    def activate(self, player, dPos):
+        game.animationTime = 16
+        x = player.x + dPos[0]*2
+        y = player.y + dPos[1]*2
+        entity = game.arena.enemy_at(x, y)
+        if entity:
+            entity.hurt(1)
+        lightning = Particle(x, y, 0, "lightning", 8)
+        game.particles.append(lightning)
+        playCrushSound()
+
 #double next spell
 #hookshot
 #teleport
@@ -494,24 +569,31 @@ class FreezeSpell(Spell):
 #defensive stuff
 #create blocks, bombs, totems etc
 #casting, healing totem
+# one time use spells.
+# charge one time use cannonSpell.
 
-ALLSPELLS = [DashSpell, StabSpell, FireSpell, ExplosionSpell, BlazeSpell, PushSpell, FreezeSpell]
+ALLSPELLS = [DashSpell, FireSpell, ExplosionSpell, BlazeSpell, PushSpell, FreezeSpell, ShieldSpell, RockSpell, BombSpell, LightningSpell]
 
 class Entity():
+
+    fat = 1
 
     def __init__(self, position):
         self.x = position[0]
         self.y = position[1]
         self.angle = 0 # 0 is right. 1 is up.
         self.frozen = 0
+        self.shield = 0
+        self.health = self.maxhealth
+        self.image = self.standingImage
 
     def move(self, vector): # returns all kinds of shit (entity, "wall", False)
         if vector == (0,0):
             print("WARNING: Entity.move() called with (0,0) step.")
         else:
             self.angle = VtoA(vector)
-        if game.arena.inbounds(self.x + vector[0], self.y+vector[1]):
-            whats_there = game.arena.entity_at(self.x + vector[0], self.y+vector[1])
+        if game.arena.inbounds(self.x + vector[0], self.y+vector[1], fat = self.fat):
+            whats_there = game.arena.entity_at(self.x + vector[0], self.y+vector[1], fat = self.fat)
             if whats_there:
                 if isinstance(self, Player):
                     playWallSound()
@@ -525,28 +607,54 @@ class Entity():
                 playWallSound()
             return "wall"
 
+    def hurt(self, dmg):
+        if self.shield>0:
+            self.shield -= 1
+        else:
+            self.health -= dmg
+            if self.health <= 0:
+                self.die()
+
+    def forcedMovement(self, dPos, distance):
+        for i in range(distance):
+            if game.arena.inbounds(self.x+dPos[0], self.y+dPos[1], fat = self.fat):
+                if not game.arena.entity_at(self.x+dPos[0], self.y+dPos[1]):
+                    self.x += dPos[0] 
+                    self.y += dPos[1]
+            else:
+                playWallSound()
+
+    @unfreezeDecorator
+    def act(self):
+        pass
+
+    def die(self):
+        if self in game.arena.entities:
+            game.arena.entities.remove(self)
+        else:
+            print("Why am i already deleted?")
+
     def draw(self):
         topleft = game.arena.get_topleft()
         x = topleft[0] + self.x*GRIDSIZE + GRIDSIZE//2
         y = topleft[1] + self.y*GRIDSIZE + GRIDSIZE//2
         if self.frozen>0:
             blitRotate(gameDisplay, self.iceImage, (x, y), (GRIDSIZE//2, GRIDSIZE//2), 0)
+        if self.shield>0:
+            blitRotate(gameDisplay, self.shieldImage, (x, y), (GRIDSIZE//2, GRIDSIZE//2), 0)
         blitRotate(gameDisplay, self.image, (x, y), (GRIDSIZE//2, GRIDSIZE//2), self.angle)
 
     iceImage = loadImage(os.path.join("particles", "ice.png"))
+    shieldImage = loadImage(os.path.join("particles", "shield.png"))
 
 class Player(Entity):
 
     def __init__(self, position):
         super().__init__(position)
-
-        self.image = self.standingImage
         self.moveHistory = []
 
-    def hurt(self, dmg=1):
-        self.health -= dmg
-        if self.health <= 0:
-            print("GAME OVER")
+    def die(self):
+        print("GAME OVER")
 
     def move(self, vector):
         game.animationTime = 8
@@ -561,7 +669,7 @@ class Player(Entity):
         game.beginResolveTurn()
 
     def castSpells(self):
-        for spell in self.spellBook:
+        for spell in game.spellBook:
             spell.current_alignment = self.checkRecipe(spell)
             #print(spell.current_alignment)
             if spell.current_alignment[0] == len(spell.recipe):
@@ -590,30 +698,46 @@ class Player(Entity):
     def drawUI(self):
         for i in range(self.health):
             gameDisplay.blit(self.standingImage, (20+60*i,20))
-        for i in range(len(self.spellBook)):
-            self.spellBook[i].draw(i)
+        for i in range(len(game.spellBook)):
+            game.spellBook[i].draw(i)
 
     standingImage = loadImage(os.path.join("player", "player2.png"))
 
 class Dasher(Player):
+
+    maxhealth = 3
+
     def __init__(self, position):
         super().__init__(position)
-        self.health = 3
-        self.spellBook = [DashSpell()]
-        self.spellBook[0].recipe = [(0,-1),(0,1),(0,-1)]
+        game.spellBook[0] = DashSpell()
+        game.spellBook[0].recipe = [(0,-1),(0,1),(0,-1)]
 class Rogue(Player):
+
+    maxhealth = 2
+
     def __init__(self, position):
         super().__init__(position)
-        self.health = 3
-        self.spellBook = [StabSpell()]
-        self.spellBook[0].recipe = [(0,0)]
+        game.spellBook[0] = StabSpell()
+        game.spellBook[0].recipe = [(0,0)]
+
+    def draw(self):
+        topleft = game.arena.get_topleft()
+        x = topleft[0] + self.x*GRIDSIZE
+        y = topleft[1] + self.y*GRIDSIZE
+        super().draw()
+        img = [self.standingImage, self.standingUpImage, self.standingLeftImage, self.standingDownImage][self.angle//90]
+        gameDisplay.blit(img, (x, y))
+
+    standingImage = loadImage(os.path.join("player", "player.png"))
+    standingLeftImage = pygame.transform.flip(loadImage(os.path.join("player", "player.png")),True,False)
+    standingDownImage = loadImage(os.path.join("player", "player_down.png"))
+    standingUpImage = loadImage(os.path.join("player", "player_up.png"))
 
 class Enemy(Entity):
 
     def __init__(self, position):
         super().__init__(position)
-        self.image = self.standingImage
-        self.health = self.maxhealth
+        self.state = "normal"
 
     def moveRandom(self):
         guess = random.choice([(0,1),(0,-1),(-1,0),(1,0)])
@@ -641,40 +765,17 @@ class Enemy(Entity):
                 dy = 0
         return VtoA((dx,dy))
 
-    def hurt(self, dmg):
-        self.health -= dmg
-        #self.frozen = max(self.frozen, 1) # inflict stun/ kb always??
-        if self.health <= 0:
-            if self in game.arena.enemies:
-                game.arena.enemies.remove(self)
-            else:
-                print("Why am i already deleted?")
-
-    def forcedMovement(self, dPos, distance):
-        for i in range(distance):
-            if game.arena.inbounds(self.x+dPos[0], self.y+dPos[1]):
-                if not game.arena.entity_at(self.x+dPos[0], self.y+dPos[1]):
-                    self.x += dPos[0] 
-                    self.y += dPos[1]
-            else:
-                playWallSound()
-
-    def act(self):
-        game.animationTime = 2
-        if self.frozen>0:
-            self.frozen -= 1
-            return True
-        return False
-        #self.move(*random.choice(list(game.controls.values())))
-
+    
     def draw(self):
         super().draw()
 
-        topleft = game.arena.get_topleft()
-        x = topleft[0] + self.x*GRIDSIZE
-        y = topleft[1] + self.y*GRIDSIZE
-        pygame.draw.rect(gameDisplay, (100,0,0), (x,y,GRIDSIZE,4), 0)
-        pygame.draw.rect(gameDisplay, (0,200,0), (x,y,GRIDSIZE*self.health/self.maxhealth,4), 0)
+        if self.health<self.maxhealth:
+            topleft = game.arena.get_topleft()
+            x = topleft[0] + self.x*GRIDSIZE
+            y = topleft[1] + self.y*GRIDSIZE
+            pygame.draw.rect(gameDisplay, (100,0,0), (x,y,GRIDSIZE,4), 0)
+            pygame.draw.rect(gameDisplay, (0,200,0), (x,y,GRIDSIZE*self.health/self.maxhealth,4), 0)
+    
 
     standingImage = loadImage(os.path.join("enemies", "ghost", "ghost.png"))
 # rework enemy health so that it can be calculated (displayed/small values/1 hit)
@@ -684,15 +785,8 @@ class Ghost(Enemy):
     powerLevel = 2
     maxhealth = 1
 
-    def __init__(self, position):
-        super().__init__(position)
-        self.image = self.standingImage
-        self.state = "normal"
-
+    @unfreezeDecorator
     def act(self):
-        if super().act(): # return if frozen hacky code. use decorator?
-            return
-
         decided_to_walk = random.random() < 0.8 and self.state=="normal"
         if decided_to_walk:
             move_collision = self.moveRandom()
@@ -703,8 +797,11 @@ class Ghost(Enemy):
             else:
                 game.animationTime = 8
                 makeSmokeCloud(self.x, self.y, 15, particleName = "electrics")
-                if -1 <= game.player.x - self.x <= 1 and -1 <= game.player.y - self.y <= 1:
-                    game.player.hurt(1)
+                for dx in [-1,0,1]:
+                    for dy in [-1,0,1]:
+                        entity = game.arena.entity_at(self.x + dx, self.y + dy)
+                        if isinstance(entity, Player) or isinstance(entity, Egg):
+                            entity.hurt(1)
                 self.image = self.standingImage
                 self.state = "normal"
         self.angle = 0
@@ -716,14 +813,8 @@ class Armadillo(Enemy):
     powerLevel = 2
     maxhealth = 1
 
-    def __init__(self, position):
-        super().__init__(position)
-        self.image = self.standingImage
-        self.state = "normal"
-
+    @unfreezeDecorator
     def act(self):
-        if super().act():
-            return
         decided_to_walk = random.random() < 0.8 and self.state=="normal"
         if decided_to_walk:
             self.angle = self.directionTowardsPlayer()
@@ -749,7 +840,7 @@ class Armadillo(Enemy):
                             game.shakeScreen(10, dPos)
                         elif entity:
                             stopped = True
-                            #entity.hurt(1)
+                            entity.hurt(0)
                             playWallSound()
                             game.shakeScreen(2, dPos)
                         else:
@@ -775,14 +866,8 @@ class Troll(Enemy):
     powerLevel = 1
     maxhealth = 1
 
-    def __init__(self, position):
-        super().__init__(position)
-        self.image = self.standingImage
-        self.state = "normal"
-
+    @unfreezeDecorator
     def act(self):
-        if super().act():
-            return
         decided_to_walk = random.random() < 0.8 and self.state=="normal"
         if decided_to_walk:
             self.angle = self.directionTowardsPlayer()
@@ -813,6 +898,109 @@ class Troll(Enemy):
 
     standingImage = loadImage(os.path.join("enemies", "troll", "troll.png"))
     prePunchImage = loadImage(os.path.join("enemies", "troll", "swing.png"))
+class MotherGhost(Enemy):
+
+    powerLevel = 15
+    maxhealth = 10
+    fat = 2
+
+    @unfreezeDecorator
+    def act(self):
+        if self.state=="normal" and random.random()<0.8:
+            self.state = random.choice(["preexplode","preexplode","eggs"])
+        if self.state == "normal":
+            move_collision = self.moveRandom()
+            self.angle = 0
+            if move_collision:
+                decided_to = "explode"
+        elif self.state == "preexplode":
+            self.state = "explode"
+            self.image = self.preExplodeImage
+        elif self.state == "explode":
+            game.animationTime = 8
+            makeSmokeCloud(self.x  , self.y  , 8, particleName = "electrics")
+            makeSmokeCloud(self.x+1, self.y  , 8, particleName = "electrics")
+            makeSmokeCloud(self.x  , self.y+1, 8, particleName = "electrics")
+            makeSmokeCloud(self.x+1, self.y+1, 8, particleName = "electrics")
+            for dx in range(-1,3):
+                for dy in range(-1,3):
+                    entity = game.arena.entity_at(self.x + dx, self.y + dy)
+                    if isinstance(entity, Player) or isinstance(entity, Egg):
+                        entity.hurt(1)
+            self.image = self.standingImage
+            self.state = "normal"
+        elif self.state == "eggs":
+            game.animationTime = 8
+            for x in range(self.x-1,self.x+3):
+                for y in range(self.y-1,self.y+3):
+                    entity = game.arena.entity_at(x, y)
+                    if (not entity) and random.random()<0.5 and game.arena.inbounds(x,y):
+                        game.arena.entities.append(Egg((x, y)))
+            self.state = "normal"
+        else:
+            print("ERROR: unknown state in mother ghost")
+
+    standingImage = loadImage(os.path.join("enemies", "mother ghost", "mother ghost.png"), (2,2))
+    preExplodeImage = loadImage(os.path.join("enemies", "ghost", "preExplode.png"), (2,2))
+# någon som lägger till pilar på alla dina spells (temporary?)
+# chess pieces
+
+class Bomb(Entity):
+
+    powerLevel = 0
+    maxhealth = 1
+    
+    def __init__(self, pos):
+        super().__init__(pos)
+        self.age = 0
+
+    @unfreezeDecorator
+    def act(self):
+        self.age += 1
+        if self.age == 1:
+            self.image = self.standing2Image
+        elif self.age == 2:
+            self.image = self.standing3Image
+        else:
+            self.die()
+
+    def die(self):
+        super().die()
+        playCrushSound()
+        for dx in [-1,0,1]:
+            for dy in [-1,0,1]:
+                x = self.x + dx
+                y = self.y + dy
+                entity = game.arena.entity_at(x, y)
+                if entity:
+                    entity.hurt(1)
+        makeSmokeCloud(self.x,self.y,10)
+
+    standingImage = loadImage(os.path.join("enemies","bomb", "bomb1.png"))
+    standing2Image = loadImage(os.path.join("enemies","bomb", "bomb2.png"))
+    standing3Image = loadImage(os.path.join("enemies","bomb", "bomb3.png"))
+class Egg(Entity):
+
+    powerLevel = 1
+    maxhealth = 1
+
+    def die(self):
+        super().die()
+        game.arena.entities.append(Ghost((self.x,self.y)))
+
+    standingImage = loadImage(os.path.join("entities", "egg.png"))
+class Rock(Entity):
+
+    powerLevel = 0
+    maxhealth = 1
+
+    def die(self):
+        super().die()
+        playCrushSound()
+        makeSmokeCloud(self.x,self.y,3, "rocks")
+
+    standingImage = loadImage(os.path.join("entities", "rock.png"))
+
 # summoner
 # healer
 # shielded
@@ -821,7 +1009,7 @@ class Troll(Enemy):
 # mario weeping angel
 # env hazards?
 
-ALLENEMIES = [Ghost, Armadillo, Troll]
+ALLENEMIES = [Ghost, Armadillo, Troll, Egg, Rock, MotherGhost]
 
 class Particle():
 
@@ -852,12 +1040,13 @@ class Particle():
 
 
     images = {}
-    for i in ["rocks","smoke","planks","electrics","swoosh","fire","arrow","darkarrow","slice","ice","swoosh"]:
+    for i in ["rocks","smoke","planks","electrics","swoosh","fire","arrow","darkarrow","slice","ice","swoosh","shield","lightning"]:
         images[i] = loadImage(os.path.join("particles", i+".png"))
 
 
 game = Game()
-game.arena.generateWave(0)
+game.playerClass = Rogue
+game.startPractice()
 
 
 jump_out = False
